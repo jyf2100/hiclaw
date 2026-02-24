@@ -11,17 +11,21 @@
 # ============================================================
 
 export TEST_MANAGER_HOST="${TEST_MANAGER_HOST:-127.0.0.1}"
+export TEST_MATRIX_PORT="${TEST_MATRIX_PORT:-6167}"
 export TEST_GATEWAY_PORT="${TEST_GATEWAY_PORT:-8080}"
 export TEST_CONSOLE_PORT="${TEST_CONSOLE_PORT:-8001}"
+export TEST_MINIO_PORT="${TEST_MINIO_PORT:-9000}"
+export TEST_MINIO_CONSOLE_PORT="${TEST_MINIO_CONSOLE_PORT:-9001}"
 export TEST_ELEMENT_PORT="${TEST_ELEMENT_PORT:-8088}"
 
-# Matrix and MinIO are accessed inside the Manager container (not exposed to host).
-# All matrix-client.sh and minio-client.sh calls go through exec_in_manager().
-export TEST_MATRIX_DIRECT_URL="http://127.0.0.1:6167"
-export TEST_MINIO_URL="http://127.0.0.1:9000"
-
 export TEST_MATRIX_URL="http://${TEST_MANAGER_HOST}:${TEST_GATEWAY_PORT}"
+export TEST_MATRIX_DIRECT_URL="${TEST_MATRIX_DIRECT_URL:-http://${TEST_MANAGER_HOST}:${TEST_MATRIX_PORT}}"
 export TEST_CONSOLE_URL="http://${TEST_MANAGER_HOST}:${TEST_CONSOLE_PORT}"
+export TEST_MINIO_URL="http://${TEST_MANAGER_HOST}:${TEST_MINIO_PORT}"
+
+# Extra headers for gateway routing (set when Matrix is accessed through gateway)
+# Example: TEST_MATRIX_EXTRA_HEADERS="Host: matrix-local.hiclaw.io:9080"
+export TEST_MATRIX_EXTRA_HEADERS="${TEST_MATRIX_EXTRA_HEADERS:-}"
 
 # Test state
 TESTS_PASSED=0
@@ -209,12 +213,6 @@ require_llm_key() {
 # ============================================================
 # Docker helpers
 # ============================================================
-
-# Run a command inside the Manager container.
-# Used by matrix-client.sh and minio-client.sh to avoid exposing Matrix/MinIO ports to host.
-exec_in_manager() {
-    docker exec "${TEST_MANAGER_CONTAINER:-hiclaw-manager-test}" "$@"
-}
 
 start_worker_container() {
     local worker_name="$1"

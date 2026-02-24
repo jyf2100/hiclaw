@@ -73,12 +73,16 @@ matrix_send_message() {
     local body="$3"
     local txn_id="$(date +%s%N)"
 
+    # Escape newlines and special chars for JSON
+    local escaped_body
+    escaped_body=$(echo "$body" | jq -Rs '.' | sed 's/^"//;s/"$//')
+
     exec_in_manager curl -sf -X PUT "${TEST_MATRIX_DIRECT_URL}/_matrix/client/v3/rooms/${room_id}/send/m.room.message/${txn_id}" \
         -H "Authorization: Bearer ${token}" \
         -H 'Content-Type: application/json' \
         -d '{
             "msgtype": "m.text",
-            "body": "'"${body}"'"
+            "body": "'"${escaped_body}"'"
         }'
 }
 

@@ -24,6 +24,11 @@ MATRIX_DOMAIN="${HICLAW_MATRIX_DOMAIN:-matrix-local.hiclaw.io:8080}"
 AI_GATEWAY_DOMAIN="${HICLAW_AI_GATEWAY_DOMAIN:-llm-local.hiclaw.io}"
 ADMIN_USER="${HICLAW_ADMIN_USER:-admin}"
 
+# Matrix Domain for user IDs (keep original port like :9080)
+# Matrix Server for connection uses internal port 8080
+MATRIX_DOMAIN_FOR_ID="${MATRIX_DOMAIN}"
+MATRIX_SERVER_PORT="8080"
+
 case "${MODEL_NAME}" in
     gpt-5.3-codex|gpt-5-mini|gpt-5-nano)
         CTX=400000; MAX=128000 ;;
@@ -49,8 +54,10 @@ export WORKER_NAME
 export WORKER_GATEWAY_AUTH_TOKEN="${GATEWAY_AUTH_TOKEN}"
 export WORKER_MATRIX_TOKEN
 export WORKER_GATEWAY_KEY
-export HICLAW_MATRIX_SERVER="http://${MATRIX_DOMAIN}"
-export HICLAW_MATRIX_DOMAIN="${MATRIX_DOMAIN}"
+# Matrix Server URL uses internal port 8080 for Docker network
+export HICLAW_MATRIX_SERVER="http://${MATRIX_DOMAIN%%:*}:${MATRIX_SERVER_PORT}"
+# Matrix Domain for user IDs keeps original port (e.g., :9080)
+export HICLAW_MATRIX_DOMAIN="${MATRIX_DOMAIN_FOR_ID}"
 export HICLAW_AI_GATEWAY="http://${AI_GATEWAY_DOMAIN}:8080"
 export HICLAW_ADMIN_USER="${ADMIN_USER}"
 export HICLAW_DEFAULT_MODEL="${MODEL_NAME}"

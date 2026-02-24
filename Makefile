@@ -205,18 +205,20 @@ push-native-worker: build-worker ## Push native-arch Worker only (dev)
 # ---------- Test ----------
 
 # Wait for Manager services to be ready (used internally by test target)
+# Uses docker exec to check health inside container (works regardless of port mappings)
 .PHONY: wait-ready
 wait-ready:
 	@echo "==> Waiting for Manager services to be ready..."
 	@TIMEOUT=300; ELAPSED=0; \
 	while [ "$$ELAPSED" -lt "$$TIMEOUT" ]; do \
-		MATRIX=$$(docker exec hiclaw-manager curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:6167/_matrix/client/versions" 2>/dev/null || echo "000"); \
-		MINIO=$$(docker exec hiclaw-manager curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:9000/minio/health/live" 2>/dev/null || echo "000"); \
-		CONSOLE=$$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$${HICLAW_PORT_CONSOLE:-8001}/" 2>/dev/null || echo "000"); \
+		RESULT=$$(docker exec hiclaw-manager bash -c 'curl -s -o /dev/null -w "%{http_code} " "http://127.0.0.1:6167/_matrix/client/versions" 2>/dev/null || echo "000 "; curl -s -o /dev/null -w "%{http_code} " "http://127.0.0.1:9000/minio/health/live" 2>/dev/null || echo "000 "; curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:8001/" 2>/dev/null || echo "000"' 2>/dev/null); \
+		MATRIX=$$(echo "$$RESULT" | tr -d '\n' | cut -d' ' -f1); \
+		MINIO=$$(echo "$$RESULT" | tr -d '\n' | cut -d' ' -f2); \
+		CONSOLE=$$(echo "$$RESULT" | tr -d '\n' | cut -d' ' -f3); \
 		if [ "$$MATRIX" = "200" ] && [ "$$MINIO" = "200" ] && [ "$$CONSOLE" = "200" ]; then \
 			echo "==> Services ready (took $${ELAPSED}s)"; \
-			echo "==> Waiting additional 120s for Manager Agent initialization..."; \
-			sleep 120; \
+			echo "==> Waiting 60s for Manager Agent initialization..."; \
+			sleep 60; \
 			echo "==> Manager Agent should be ready now"; \
 			exit 0; \
 		fi; \
@@ -229,13 +231,12 @@ wait-ready:
 
 test: ## Run integration tests (installs Manager first unless SKIP_INSTALL=1)
 ifdef SKIP_INSTALL
-	@echo "==> Running tests against existing installation (YOLO mode)"
-	@docker exec hiclaw-manager touch /root/manager-workspace/yolo-mode 2>/dev/null || true
+	@echo "==> Running tests against existing installation"
 	./tests/run-all-tests.sh --skip-build --use-existing $(if $(TEST_FILTER),--test-filter "$(TEST_FILTER)") $(if $(INCLUDE_PROJECT_TEST),--include-project-test)
 else
-	@echo "==> Installing Manager and running tests (YOLO mode)"
+	@echo "==> Installing Manager and running tests"
 	$(MAKE) uninstall 2>/dev/null || true
-	HICLAW_YOLO=1 $(MAKE) install
+	$(MAKE) install
 	$(MAKE) wait-ready
 	./tests/run-all-tests.sh --skip-build --use-existing $(if $(TEST_FILTER),--test-filter "$(TEST_FILTER)") $(if $(INCLUDE_PROJECT_TEST),--include-project-test)
 endif
@@ -285,8 +286,7 @@ uninstall: ## Stop and remove Manager + all Worker containers
 
 # ---------- Replay ----------
 
-replay: ## Send a task to Manager (TASK="..." or interactive, YOLO mode auto-enabled)
-	@docker exec hiclaw-manager touch /root/manager-workspace/yolo-mode 2>/dev/null || true
+replay: ## Send a task to Manager (TASK="..." or interactive)
 ifdef TASK
 	./scripts/replay-task.sh "$(TASK)"
 else

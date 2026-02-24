@@ -262,7 +262,7 @@ done
 # Step 5: Authorize MCP Servers
 # ============================================================
 log "Step 5: Authorizing MCP servers..."
-ALL_MCP_RAW=$(curl -sf http://127.0.0.1:8001/v1/mcpServers \
+ALL_MCP_RAW=$(curl -sf http://127.0.0.1:8001/v1/mcpServer \
     -b "${HIGRESS_COOKIE_FILE}" 2>/dev/null) || true
 ALL_MCP=$(echo "${ALL_MCP_RAW}" | jq '.data // .' 2>/dev/null || echo "${ALL_MCP_RAW}")
 
@@ -313,7 +313,8 @@ bash /opt/hiclaw/agent/skills/worker-management/scripts/generate-worker-config.s
 # Generate mcporter-servers.json if MCP servers are authorized
 if [ -n "${TARGET_MCP_LIST}" ]; then
     log "  Generating mcporter-servers.json..."
-    AI_GW_DOMAIN="${HICLAW_AI_GATEWAY_DOMAIN:-llm-local.hiclaw.io}"
+    # MCP servers are hosted on mcp-local.hiclaw.io, not the AI gateway domain
+    MCP_DOMAIN="${HICLAW_MCP_DOMAIN:-mcp-local.hiclaw.io}"
     MCPORTER_JSON='{"mcpServers":{'
     FIRST=true
     IFS=',' read -ra MCP_ARR2 <<< "${TARGET_MCP_LIST}"
@@ -321,7 +322,7 @@ if [ -n "${TARGET_MCP_LIST}" ]; then
         mcp_name=$(echo "${mcp_name}" | tr -d ' ')
         [ -z "${mcp_name}" ] && continue
         if [ "${FIRST}" = true ]; then FIRST=false; else MCPORTER_JSON="${MCPORTER_JSON},"; fi
-        MCPORTER_JSON="${MCPORTER_JSON}\"${mcp_name}\":{\"url\":\"http://${AI_GW_DOMAIN}:8080/mcp/${mcp_name}\",\"transport\":\"http\",\"headers\":{\"Authorization\":\"Bearer ${WORKER_KEY}\"}}"
+        MCPORTER_JSON="${MCPORTER_JSON}\"${mcp_name}\":{\"url\":\"http://${MCP_DOMAIN}:8080/mcp/${mcp_name}\",\"transport\":\"http\",\"headers\":{\"Authorization\":\"Bearer ${WORKER_KEY}\"}}"
     done
     MCPORTER_JSON="${MCPORTER_JSON}}}"
     echo "${MCPORTER_JSON}" | jq . > "${HOME}/hiclaw-fs/agents/${WORKER_NAME}/mcporter-servers.json"

@@ -92,7 +92,9 @@ container_create_worker() {
     fi
 
     # Build environment variables for the Worker
-    local fs_endpoint="http://${HICLAW_FS_DOMAIN:-fs-local.hiclaw.io}:8080"
+    # Use internal port 8080 for Docker network communication
+    local fs_domain="${HICLAW_FS_DOMAIN%%:*}"
+    local fs_endpoint="http://${fs_domain}:8080"
     local fs_access_key="${2:-${HICLAW_MINIO_USER:-${HICLAW_ADMIN_USER:-admin}}}"
     local fs_secret_key="${3:-${HICLAW_MINIO_PASSWORD:-${HICLAW_ADMIN_PASSWORD:-admin}}}"
 

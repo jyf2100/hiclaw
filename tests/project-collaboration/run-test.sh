@@ -116,12 +116,15 @@ MANAGER_USER="@manager:${MATRIX_DOMAIN}"
 DM_ROOM=$(matrix_find_dm_room "${ADMIN_TOKEN}" "${MANAGER_USER}" 2>/dev/null || true)
 if [ -z "${DM_ROOM}" ]; then
     log_info "Creating DM room with Manager..."
-    DM_ROOM=$(curl -sf -X POST "${MATRIX_DIRECT_URL}/_matrix/client/v3/createRoom" \
-        -H "Authorization: Bearer ${ADMIN_TOKEN}" \
-        -H 'Content-Type: application/json' \
-        -d '{"is_direct":true,"invite":["'"${MANAGER_USER}"'"],"preset":"trusted_private_chat"}' \
-        2>/dev/null | jq -r '.room_id // empty')
+    DM_ROOM=$(matrix_create_dm "${ADMIN_TOKEN}" "${MANAGER_USER}" 2>/dev/null | jq -r '.room_id // empty')
 fi
+assert_not_empty "${DM_ROOM}" "DM room with Manager exists"
+log_tee "DM Room: ${DM_ROOM}"
+
+# Helper to run mc commands inside the manager container
+mc_exec() {
+    docker exec "${MANAGER_CONTAINER}" mc "$@"
+}
 assert_not_empty "${DM_ROOM}" "DM room with Manager exists"
 log_tee "DM Room: ${DM_ROOM}"
 
@@ -161,7 +164,7 @@ else
         # Wait for worker MinIO files to appear
         log_info "Waiting for ${worker} config in MinIO..."
         MINIO_WAIT=0
-        until mc stat "hiclaw/hiclaw-storage/agents/${worker}/SOUL.md" > /dev/null 2>&1; do
+        until mc_exec stat "hiclaw/hiclaw-storage/agents/${worker}/SOUL.md" > /dev/null 2>&1; do
             sleep 5
             MINIO_WAIT=$((MINIO_WAIT + 5))
             if [ "${MINIO_WAIT}" -ge 120 ]; then
@@ -169,7 +172,7 @@ else
                 break
             fi
         done
-        if mc stat "hiclaw/hiclaw-storage/agents/${worker}/SOUL.md" > /dev/null 2>&1; then
+        if mc_exec stat "hiclaw/hiclaw-storage/agents/${worker}/SOUL.md" > /dev/null 2>&1; then
             log_pass "Worker ${worker} SOUL.md in MinIO"
         fi
 
@@ -239,8 +242,7 @@ while [ "${ELAPSED}" -lt "${PROJECT_TIMEOUT}" ]; do
         # Look for a room named "Project: ..."
         ALL_ROOMS=$(matrix_joined_rooms "${ADMIN_TOKEN}" 2>/dev/null | jq -r '.joined_rooms[]' 2>/dev/null || true)
         for room_id in ${ALL_ROOMS}; do
-            ROOM_NAME=$(curl -sf "${MATRIX_DIRECT_URL}/_matrix/client/v3/rooms/${room_id}/state/m.room.name" \
-                -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null | jq -r '.name // empty' 2>/dev/null || true)
+            ROOM_NAME=$(matrix_get_room_name "${ADMIN_TOKEN}" "${room_id}" 2>/dev/null || true)
             if echo "${ROOM_NAME}" | grep -qi "^Project:"; then
                 PROJECT_ROOM_ID="${room_id}"
                 log_info "Found project room: ${ROOM_NAME} (${PROJECT_ROOM_ID})"
@@ -252,7 +254,7 @@ while [ "${ELAPSED}" -lt "${PROJECT_TIMEOUT}" ]; do
 
     # Check if project meta.json exists in MinIO
     if [ -z "${PROJECT_ID}" ]; then
-        PROJECT_META_LIST=$(mc ls "hiclaw/hiclaw-storage/shared/projects/" 2>/dev/null | awk '{print $NF}' | tr -d '/' || true)
+        PROJECT_META_LIST=$(mc_exec ls "hiclaw/hiclaw-storage/shared/projects/" 2>/dev/null | awk '{print $NF}' | tr -d '/' || true)
         if [ -n "${PROJECT_META_LIST}" ]; then
             PROJECT_ID=$(echo "${PROJECT_META_LIST}" | head -1)
             log_info "Found project: ${PROJECT_ID}"
@@ -262,7 +264,7 @@ while [ "${ELAPSED}" -lt "${PROJECT_TIMEOUT}" ]; do
 
     # Check plan.md for completion
     if [ -n "${PROJECT_ID}" ]; then
-        PLAN_CONTENT=$(mc cat "hiclaw/hiclaw-storage/shared/projects/${PROJECT_ID}/plan.md" 2>/dev/null || true)
+        PLAN_CONTENT=$(mc_exec cat "hiclaw/hiclaw-storage/shared/projects/${PROJECT_ID}/plan.md" 2>/dev/null || true)
         if [ -n "${PLAN_CONTENT}" ]; then
             # Check if all tasks are [x]
             PENDING_COUNT=$(echo "${PLAN_CONTENT}" | grep -c '^\- \[ \]' 2>/dev/null || echo "0")
@@ -312,13 +314,24 @@ dump_room_messages() {
     local room_label="$3"
     local limit="${4:-200}"
 
-    curl -sf "${MATRIX_DIRECT_URL}/_matrix/client/v3/rooms/${room_id}/messages?dir=b&limit=${limit}" \
-        -H "Authorization: Bearer ${token}" 2>/dev/null | \
-        jq -r --arg label "${room_label}" '
-            .chunk | reverse | .[] |
-            select(.content.body != null and .content.body != "") |
-            "[\(.origin_server_ts / 1000 | strftime("%H:%M:%S"))] \(.sender | split(":")[0] | ltrimstr("@")): \(.content.body)"
-        ' 2>/dev/null >> "${CHAT_LOG}" || true
+    if [ -n "${TEST_MATRIX_EXTRA_HEADERS}" ]; then
+        curl -sf "${MATRIX_DIRECT_URL}/_matrix/client/v3/rooms/${room_id}/messages?dir=b&limit=${limit}" \
+            -H "Authorization: Bearer ${token}" \
+            -H "${TEST_MATRIX_EXTRA_HEADERS}" 2>/dev/null | \
+            jq -r --arg label "${room_label}" '
+                .chunk | reverse | .[] |
+                select(.content.body != null and .content.body != "") |
+                "[\(.origin_server_ts / 1000 | strftime("%H:%M:%S"))] \(.sender | split(":")[0] | ltrimstr("@")): \(.content.body)"
+            ' 2>/dev/null >> "${CHAT_LOG}" || true
+    else
+        curl -sf "${MATRIX_DIRECT_URL}/_matrix/client/v3/rooms/${room_id}/messages?dir=b&limit=${limit}" \
+            -H "Authorization: Bearer ${token}" 2>/dev/null | \
+            jq -r --arg label "${room_label}" '
+                .chunk | reverse | .[] |
+                select(.content.body != null and .content.body != "") |
+                "[\(.origin_server_ts / 1000 | strftime("%H:%M:%S"))] \(.sender | split(":")[0] | ltrimstr("@")): \(.content.body)"
+            ' 2>/dev/null >> "${CHAT_LOG}" || true
+    fi
 }
 
 echo "# Chat Log — Project Collaboration Test" > "${CHAT_LOG}"
@@ -339,8 +352,7 @@ ALL_ROOMS=$(matrix_joined_rooms "${ADMIN_TOKEN}" 2>/dev/null | jq -r '.joined_ro
 for room_id in ${ALL_ROOMS}; do
     [ "${room_id}" = "${DM_ROOM}" ] && continue
     [ "${room_id}" = "${PROJECT_ROOM_ID}" ] && continue
-    ROOM_NAME=$(curl -sf "${MATRIX_DIRECT_URL}/_matrix/client/v3/rooms/${room_id}/state/m.room.name" \
-        -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null | jq -r '.name // empty' 2>/dev/null || true)
+    ROOM_NAME=$(matrix_get_room_name "${ADMIN_TOKEN}" "${room_id}" 2>/dev/null || true)
     if echo "${ROOM_NAME}" | grep -qi "Worker:"; then
         echo "" >> "${CHAT_LOG}"
         echo "## ${ROOM_NAME}" >> "${CHAT_LOG}"
