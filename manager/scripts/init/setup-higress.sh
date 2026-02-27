@@ -98,7 +98,7 @@ higress_api POST /v1/consumers "Creating Manager consumer" \
 # 2. Matrix Homeserver Route (no auth - public access)
 # ============================================================
 higress_api POST /v1/routes "Creating Matrix Homeserver route" \
-    '{"name":"matrix-homeserver","domains":["'"${MATRIX_DOMAIN%%:*}"'"],"path":{"matchType":"PRE","matchValue":"/_matrix"},"services":[{"name":"tuwunel.static","port":6167,"weight":100}]}'
+    '{"name":"matrix-homeserver","domains":[],"path":{"matchType":"PRE","matchValue":"/_matrix"},"services":[{"name":"tuwunel.static","port":6167,"weight":100}]}'
 
 # ============================================================
 # 3. Element Web Route (no auth - public access)
