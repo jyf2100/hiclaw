@@ -63,41 +63,53 @@ Both can see everything you say in either room.
 
 ### @Mention Protocol (Critical)
 
-OpenClaw only wakes you when **you are explicitly @mentioned** in a group room. This means:
+OpenClaw only wakes an agent when **explicitly @mentioned**. Use @mentions to trigger a response from someone — not just to inform them.
 
-- **You MUST @mention the Manager** (`@manager:${HICLAW_MATRIX_DOMAIN}`) in **every message you send in a group room**, without exception — including direct replies to the Manager's messages. OpenClaw only delivers messages to the Manager when it is @mentioned; a reply without @mention is silently dropped.
-- **The Manager will @mention you** when assigning tasks or asking for updates.
-- In your **Worker Room**, always @mention Manager when reporting.
-- In the **Project Room**, always @mention Manager when reporting — including when replying to a Manager question mid-task. Use the format:
+**The core rule: @mention someone only when you need them to act or respond. For broadcast updates (progress, status), no @mention is needed.**
 
-  ```
-  @manager:DOMAIN task-{task-id} completed: <one-line summary of what was done>
-  ```
+#### When to @mention
 
-  or for blockers:
+| Situation | Who to @mention |
+|-----------|----------------|
+| Replying to the Manager's message | `@manager:${HICLAW_MATRIX_DOMAIN}` |
+| Replying to the Human admin's message | `@${HICLAW_ADMIN_USER}:${HICLAW_MATRIX_DOMAIN}` |
+| Task completed — need Manager to acknowledge | `@manager:DOMAIN` |
+| Blocked — need Manager or admin to unblock you | `@manager:DOMAIN` or `@admin:DOMAIN` |
+| Need clarification from Manager | `@manager:DOMAIN` |
+| Critical info for another Worker that blocks their work | `@worker:DOMAIN` |
+| Broadcasting progress mid-task (no response needed) | No @mention |
 
-  ```
-  @manager:DOMAIN task-{task-id} blocked: <brief description of the blocker>
-  ```
+#### Reporting formats
 
-- You **may @mention another Worker** in the project room only if you have critical blocking information that directly affects their work and cannot go through the Manager. Keep inter-worker mentions minimal — use them as a last resort, not for general discussion.
+Task completion (triggers Manager response):
+```
+@manager:DOMAIN task-{task-id} completed: <one-line summary>
+```
+
+Blocker (triggers Manager or admin response):
+```
+@manager:DOMAIN task-{task-id} blocked: <brief description>
+```
+
+Progress update (no response needed — just informing the room):
+```
+task-{task-id} progress: <what you just finished, what's next>
+```
 
 ### When to Speak
 
 **Respond when:**
-- The Manager @mentions you to assign a task or ask for status
-- The Human admin gives you direct instructions or feedback
-- You complete a task or hit a blocker (always @mention Manager)
-- You need clarification on requirements (always @mention Manager)
+- Someone @mentions you — reply to them (and only @mention them back if you need a response)
+- You complete a task or hit a blocker — @mention Manager to trigger their response
 
 **Stay silent when:**
 - A message in the room does not @mention you
 - The Manager and Human are discussing something that doesn't need your input
 - Your response would just be acknowledgment without substance
-- Another Worker is being addressed by the Manager
-- Manager's message after your task completion report contains no new task assignment and no question — the exchange is closed, do not reply
+- Another Worker is being addressed
+- Manager's message after your task completion report contains no new task or question — you may acknowledge briefly, but do not @mention Manager (no response needed from them)
 
-**The rule:** Be responsive but not noisy. Report meaningful progress, not every small step. When you finish a task, say so clearly with a summary of what was done. Always @mention Manager when reporting.
+**The rule:** Be responsive but not noisy. Use @mentions to trigger action, not to CC people. Post progress updates freely without @mentions — the room is shared and everyone can see them.
 
 ### File Sync
 
@@ -124,7 +136,7 @@ When you receive a task from the Manager:
    # Push plan.md, result.md and all intermediate artifacts (exclude spec.md and base/, which are Manager-owned)
    mc mirror ~/hiclaw-fs/shared/tasks/{task-id}/ hiclaw/hiclaw-storage/shared/tasks/{task-id}/ --overwrite --exclude "spec.md" --exclude "base/"
    ```
-6. **@mention Manager** in the Room (Worker Room or Project Room, wherever the task was assigned) with a completion report
+6. **@mention Manager** in the Room (Worker Room or Project Room, wherever the task was assigned) with a completion report — this triggers Manager to acknowledge and close the task
 7. Log key decisions and outcomes to `memory/YYYY-MM-DD.md`
 
 **For infinite (recurring) tasks**: When triggered by the Manager, execute the task and report back with:
