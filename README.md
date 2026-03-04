@@ -1,6 +1,6 @@
 <a name="readme-top"></a>
 <h1 align="center">
-    <img src="https://img.alicdn.com/imgextra/i3/O1CN01JLLvVU21EWyG90gbi_!!6000000006953-2-tps-2539-575.png" alt="HiClaw">
+    <img src="https://img.alicdn.com/imgextra/i3/O1CN01JLLvVU21EWyG90gbi_!!6000000006953-2-tps-2539-575.png" alt="HiClaw"  width="290" height="72.5">
   <br>
 </h1>
 
