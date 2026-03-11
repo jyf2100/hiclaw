@@ -60,7 +60,7 @@ ln -sf "${WORKSPACE}/openclaw.json" "${HOME}/.openclaw/openclaw.json"
 # Skills in ~/skills/ will be synced to MinIO and persist across container restarts
 mkdir -p "${HOME}/skills"
 mkdir -p "${HOME}/.agents"
-ln -sf "${HOME}/skills" "${HOME}/.agents/skills"
+ln -sfnT "${HOME}/skills" "${HOME}/.agents/skills"
 
 log "Worker config pulled successfully"
 
