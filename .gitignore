@@ -14,3 +14,4 @@ logs/
 # Design docs
 design/
 poc-verification/
+.claude/
