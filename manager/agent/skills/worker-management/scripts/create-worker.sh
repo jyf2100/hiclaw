@@ -58,6 +58,7 @@ if [ "${ENABLE_FIND_SKILLS}" = true ]; then
 fi
 
 MATRIX_DOMAIN="${HICLAW_MATRIX_DOMAIN:-matrix-local.hiclaw.io:8080}"
+MATRIX_SERVER="${HICLAW_MATRIX_SERVER:-${MATRIX_SERVER}}"
 ADMIN_USER="${HICLAW_ADMIN_USER:-admin}"
 CONSUMER_NAME="worker-${WORKER_NAME}"
 SOUL_FILE="/root/hiclaw-fs/agents/${WORKER_NAME}/SOUL.md"
@@ -85,7 +86,7 @@ if [ -z "${MANAGER_MATRIX_TOKEN}" ]; then
     if [ -z "${MANAGER_PASSWORD}" ]; then
         _fail "MANAGER_MATRIX_TOKEN not set and HICLAW_MANAGER_PASSWORD not available"
     fi
-    MANAGER_MATRIX_TOKEN=$(curl -sf -X POST http://127.0.0.1:6167/_matrix/client/v3/login \
+    MANAGER_MATRIX_TOKEN=$(curl -sf -X POST ${MATRIX_SERVER}/_matrix/client/v3/login \
         -H 'Content-Type: application/json' \
         -d '{"type":"m.login.password","identifier":{"type":"m.id.user","user":"manager"},"password":"'"${MANAGER_PASSWORD}"'"}' \
         2>/dev/null | jq -r '.access_token // empty')
@@ -123,7 +124,7 @@ else
 fi
 [ -z "${WORKER_MINIO_PASSWORD}" ] && WORKER_MINIO_PASSWORD=$(generateKey 24)
 
-REG_RESP=$(curl -s -X POST http://127.0.0.1:6167/_matrix/client/v3/register \
+REG_RESP=$(curl -s -X POST ${MATRIX_SERVER}/_matrix/client/v3/register \
     -H 'Content-Type: application/json' \
     -d '{
         "username": "'"${WORKER_NAME}"'",
@@ -140,7 +141,7 @@ if echo "${REG_RESP}" | jq -e '.access_token' > /dev/null 2>&1; then
 else
     # Account already exists — login with persisted password
     log "  Account exists, logging in..."
-    LOGIN_RESP=$(curl -s -X POST http://127.0.0.1:6167/_matrix/client/v3/login \
+    LOGIN_RESP=$(curl -s -X POST ${MATRIX_SERVER}/_matrix/client/v3/login \
         -H 'Content-Type: application/json' \
         -d '{
             "type": "m.login.password",
@@ -209,27 +210,65 @@ rm -f "${POLICY_FILE}"
 log "  MinIO user ${WORKER_NAME} created with policy ${POLICY_NAME}"
 
 # ============================================================
-# Step 2: Create Matrix Room (3-party)
+# Step 2: Create or Reuse Matrix Room (3-party)
 # ============================================================
-log "Step 2: Creating Matrix room..."
-ROOM_RESP=$(curl -sf -X POST http://127.0.0.1:6167/_matrix/client/v3/createRoom \
-    -H "Authorization: Bearer ${MANAGER_MATRIX_TOKEN}" \
-    -H 'Content-Type: application/json' \
-    -d '{
-        "name": "Worker: '"${WORKER_NAME}"'",
-        "topic": "Communication channel for '"${WORKER_NAME}"'",
-        "invite": [
-            "@'"${ADMIN_USER}"':'"${MATRIX_DOMAIN}"'",
-            "@'"${WORKER_NAME}"':'"${MATRIX_DOMAIN}"'"
-        ],
-        "preset": "trusted_private_chat"
-    }' 2>/dev/null) || _fail "Failed to create Matrix room"
+log "Step 2: Checking for existing Matrix room..."
 
-ROOM_ID=$(echo "${ROOM_RESP}" | jq -r '.room_id // empty')
-if [ -z "${ROOM_ID}" ]; then
-    _fail "Failed to create Matrix room: ${ROOM_RESP}"
+# Function to URL encode room ID
+_url_encode_room() {
+    python3 -c "import urllib.parse; print(urllib.parse.quote(\"$1\", safe=''))"
+}
+
+# Check if room already exists in registry
+REGISTRY_FILE_CHECK="${HOME}/workers-registry.json"
+EXISTING_ROOM_ID=""
+ROOM_REUSE=false
+
+if [ -f "${REGISTRY_FILE_CHECK}" ]; then
+    EXISTING_ROOM_ID=$(jq -r --arg w "${WORKER_NAME}" '.workers[$w].room_id // empty' "${REGISTRY_FILE_CHECK}" 2>/dev/null || true)
 fi
-log "  Room created: ${ROOM_ID}"
+
+if [ -n "${EXISTING_ROOM_ID}" ]; then
+    log "  Found existing room in registry: ${EXISTING_ROOM_ID}"
+
+    # Check if Manager is still in this room
+    ENCODED_ROOM=$(_url_encode_room "${EXISTING_ROOM_ID}")
+    ROOM_STATE=$(curl -sf "${MATRIX_SERVER}/_matrix/client/v3/rooms/${ENCODED_ROOM}/state/m.room.name" \
+        -H "Authorization: Bearer ${MANAGER_MATRIX_TOKEN}" 2>/dev/null || true)
+
+    if [ -n "${ROOM_STATE}" ] && echo "${ROOM_STATE}" | jq -e '.name' > /dev/null 2>&1; then
+        # Room exists and Manager is in it - reuse it
+        ROOM_ID="${EXISTING_ROOM_ID}"
+        ROOM_REUSE=true
+        log "  ✅ Reusing existing room: ${ROOM_ID}"
+    else
+        log "  ⚠️ Existing room not accessible, will create new one"
+        EXISTING_ROOM_ID=""
+    fi
+fi
+
+# Create new room if not reusing
+if [ "${ROOM_REUSE}" = false ]; then
+    log "  Creating new Matrix room..."
+    ROOM_RESP=$(curl -sf -X POST ${MATRIX_SERVER}/_matrix/client/v3/createRoom \
+        -H "Authorization: Bearer ${MANAGER_MATRIX_TOKEN}" \
+        -H 'Content-Type: application/json' \
+        -d '{
+            "name": "Worker: '"${WORKER_NAME}"'",
+            "topic": "Communication channel for '"${WORKER_NAME}"'",
+            "invite": [
+                "@'"${ADMIN_USER}"':'"${MATRIX_DOMAIN}"'",
+                "@'"${WORKER_NAME}"':'"${MATRIX_DOMAIN}"'"
+            ],
+            "preset": "trusted_private_chat"
+        }' 2>/dev/null) || _fail "Failed to create Matrix room"
+
+    ROOM_ID=$(echo "${ROOM_RESP}" | jq -r '.room_id // empty')
+    if [ -z "${ROOM_ID}" ]; then
+        _fail "Failed to create Matrix room: ${ROOM_RESP}"
+    fi
+    log "  Room created: ${ROOM_ID}"
+fi
 
 # ============================================================
 # Step 3: Create Higress Consumer (key-auth)
@@ -450,7 +489,7 @@ if [ -f "${REGISTRY_FILE_EARLY}" ]; then
                 if [ -n "${EW_ROOM_ID}" ]; then
                     TXN_ID=$(openssl rand -hex 8)
                     curl -sf -X PUT \
-                        "http://127.0.0.1:6167/_matrix/client/v3/rooms/${EW_ROOM_ID}/send/m.room.message/${TXN_ID}" \
+                        "${MATRIX_SERVER}/_matrix/client/v3/rooms/${EW_ROOM_ID}/send/m.room.message/${TXN_ID}" \
                         -H "Authorization: Bearer ${MANAGER_MATRIX_TOKEN}" \
                         -H 'Content-Type: application/json' \
                         -d "{\"msgtype\":\"m.text\",\"body\":\"@${ew}:${MATRIX_DOMAIN} Your config has been updated (new worker @${WORKER_NAME}:${MATRIX_DOMAIN} added to groupAllowFrom). Please run: hiclaw-sync\",\"m.mentions\":{\"user_ids\":[\"@${ew}:${MATRIX_DOMAIN}\"]}}" \
