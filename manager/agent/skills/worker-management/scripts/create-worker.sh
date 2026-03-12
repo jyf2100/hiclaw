@@ -62,6 +62,7 @@ fi
 MATRIX_DOMAIN="${HICLAW_MATRIX_DOMAIN:-matrix-local.hiclaw.io:8080}"
 MATRIX_SERVER="${HICLAW_MATRIX_SERVER:-${MATRIX_SERVER}}"
 ADMIN_USER="${HICLAW_ADMIN_USER:-admin}"
+MANAGER_USER="${HICLAW_MANAGER_USER:-manager}"
 CONSUMER_NAME="worker-${WORKER_NAME}"
 SOUL_FILE="/root/hiclaw-fs/agents/${WORKER_NAME}/SOUL.md"
 
@@ -412,11 +413,12 @@ if [ "${ROOM_REUSE}" = false ]; then
     ROOM_PAYLOAD=$(jq -cn \
         --arg rk "${ROOM_KEY}" \
         --arg admin "@${ADMIN_USER}:${MATRIX_DOMAIN}" \
+        --arg manager "@${MANAGER_USER}:${MATRIX_DOMAIN}" \
         --arg worker "@${WORKER_NAME}:${MATRIX_DOMAIN}" \
         '{
             name: ("Worker Group: " + $rk),
             topic: ("Worker collaboration room (" + $rk + ")"),
-            invite: [$admin, $worker],
+            invite: [$admin, $manager, $worker],
             preset: "trusted_private_chat"
         }')
 
@@ -432,9 +434,10 @@ if [ "${ROOM_REUSE}" = false ]; then
     log "  Room created: ${ROOM_ID}"
 fi
 
-# Ensure current worker/admin are members of the interaction room
-ensure_room_member "${ROOM_ID}" "@${WORKER_NAME}:${MATRIX_DOMAIN}" "${MANAGER_MATRIX_TOKEN}"
-ensure_room_member "${ROOM_ID}" "@${ADMIN_USER}:${MATRIX_DOMAIN}" "${MANAGER_MATRIX_TOKEN}"
+# Ensure current worker/admin/manager are members of the interaction room
+ensure_room_member "${ROOM_ID}" "@${WORKER_NAME}:${MATRIX_DOMAIN}" "${MANAGER_MATRIX_TOKEN}" || true
+ensure_room_member "${ROOM_ID}" "@${ADMIN_USER}:${MATRIX_DOMAIN}" "${MANAGER_MATRIX_TOKEN}" || true
+ensure_room_member "${ROOM_ID}" "@${MANAGER_USER}:${MATRIX_DOMAIN}" "${MANAGER_MATRIX_TOKEN}" || true
 
 # ============================================================
 # Step 3: Create Higress Consumer (key-auth)
@@ -563,7 +566,7 @@ if [ -f "${REGISTRY_FILE_EARLY}" ]; then
     for ew in ${TARGET_PEERS}; do
         EW_ID="@${ew}:${MATRIX_DOMAIN}"
         # Ensure worker is invited into shared room for interaction
-        ensure_room_member "${ROOM_ID}" "${EW_ID}" "${MANAGER_MATRIX_TOKEN}"
+        ensure_room_member "${ROOM_ID}" "${EW_ID}" "${MANAGER_MATRIX_TOKEN}" || true
 
         ALREADY=$(jq -r --arg w "${EW_ID}" \
             '.channels.matrix.groupAllowFrom // [] | map(select(. == $w)) | length' \
