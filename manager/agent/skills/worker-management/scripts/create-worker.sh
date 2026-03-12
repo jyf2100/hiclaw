@@ -6,7 +6,7 @@
 # MinIO sync, skills push, and container startup.
 #
 # Usage:
-#   create-worker.sh --name <NAME> [--model <MODEL_ID>] [--mcp-servers s1,s2] [--skills s1,s2] [--find-skills] [--skills-api-url <URL>] [--remote]
+#   create-worker.sh --name <NAME> [--model <MODEL_ID>] [--mcp-servers s1,s2] [--skills s1,s2] [--room-key <KEY>] [--find-skills] [--skills-api-url <URL>] [--remote]
 #
 # Prerequisites:
 #   - SOUL.md must already exist at ~/hiclaw-fs/agents/<NAME>/SOUL.md
@@ -24,6 +24,7 @@ WORKER_NAME=""
 MODEL_ID=""
 MCP_SERVERS=""
 WORKER_SKILLS="file-sync"
+ROOM_KEY=""
 REMOTE_MODE=false
 ENABLE_FIND_SKILLS=false
 SKILLS_API_URL=""
@@ -34,6 +35,7 @@ while [ $# -gt 0 ]; do
         --model)      MODEL_ID="$2"; shift 2 ;;
         --mcp-servers) MCP_SERVERS="$2"; shift 2 ;;
         --skills)     WORKER_SKILLS="$2"; shift 2 ;;
+        --room-key)   ROOM_KEY="$2"; shift 2 ;;
         --find-skills) ENABLE_FIND_SKILLS=true; shift ;;
         --skills-api-url) SKILLS_API_URL="$2"; shift 2 ;;
         --remote)     REMOTE_MODE=true; shift ;;
@@ -42,7 +44,7 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -z "${WORKER_NAME}" ]; then
-    echo "Usage: create-worker.sh --name <NAME> [--model <MODEL_ID>] [--mcp-servers s1,s2] [--skills s1,s2] [--find-skills] [--skills-api-url <URL>] [--remote]"
+    echo "Usage: create-worker.sh --name <NAME> [--model <MODEL_ID>] [--mcp-servers s1,s2] [--skills s1,s2] [--room-key <KEY>] [--find-skills] [--skills-api-url <URL>] [--remote]"
     exit 1
 fi
 
@@ -219,13 +221,169 @@ _url_encode_room() {
     python3 -c "import urllib.parse; print(urllib.parse.quote(\"$1\", safe=''))"
 }
 
+# Normalize department/worker id for room-key generation
+normalize_dept() {
+    local d
+    d=$(echo "$1" | tr '[:upper:]' '[:lower:]' | xargs)
+    case "$d" in
+        libu-hr) echo "libu_hr" ;;
+        *) echo "$d" ;;
+    esac
+}
+
+# Room key templates:
+#   make_room_key core
+#   make_room_key exec gongbu
+#   make_room_key cross gongbu hubu
+#   make_room_key incident TASK-123
+make_room_key() {
+    local kind="${1:?kind required}"
+    shift || true
+
+    case "${kind}" in
+        core)
+            echo "core-governance"
+            ;;
+        exec)
+            local dept="${1:?dept required}"
+            echo "exec:$(normalize_dept "${dept}")"
+            ;;
+        cross)
+            [ "$#" -ge 2 ] || { echo "cross requires >=2 departments" >&2; return 1; }
+            printf '%s\n' "$@" \
+                | while read -r d; do normalize_dept "$d"; done \
+                | sort -u \
+                | paste -sd+ - \
+                | sed 's/^/cross:/'
+            ;;
+        incident)
+            local task_id="${1:-global}"
+            echo "incident:${task_id}"
+            ;;
+        *)
+            echo "unknown kind: ${kind}" >&2
+            return 1
+            ;;
+    esac
+}
+
+# Send a Matrix message with explicit @mention (MSC3952)
+# usage: send_mentioned_message <room_id> <target_user_id> <text> [sender_token]
+send_mentioned_message() {
+    local room_id="${1:?room_id required}"
+    local target_user_id="${2:?target_user_id required}"
+    local text="${3:?text required}"
+    local sender_token="${4:-${MANAGER_MATRIX_TOKEN:-}}"
+
+    if [ -z "${sender_token}" ]; then
+        echo "send_mentioned_message: sender token missing" >&2
+        return 1
+    fi
+
+    local encoded_room
+    encoded_room=$(_url_encode_room "${room_id}")
+
+    local txn_id
+    txn_id="$(date +%s%3N)-${RANDOM}"
+
+    local msg_body payload resp http_code event_id
+    msg_body="${target_user_id} ${text}"
+    payload=$(jq -cn --arg body "${msg_body}" --arg uid "${target_user_id}" '{
+        msgtype: "m.text",
+        body: $body,
+        "m.mentions": { user_ids: [$uid] }
+    }')
+
+    resp=$(curl -sS -w '\n%{http_code}' -X PUT "${MATRIX_SERVER}/_matrix/client/v3/rooms/${encoded_room}/send/m.room.message/${txn_id}" \
+        -H "Authorization: Bearer ${sender_token}" \
+        -H 'Content-Type: application/json' \
+        -d "${payload}" 2>/dev/null || true)
+
+    http_code=$(echo "${resp}" | tail -n1)
+    event_id=$(echo "${resp}" | sed '$d' | jq -r '.event_id // empty' 2>/dev/null || true)
+
+    if [[ "${http_code}" =~ ^2[0-9][0-9]$ ]] && [ -n "${event_id}" ]; then
+        echo "${event_id}"
+        return 0
+    fi
+
+    log "  WARNING: Failed to send mention to ${target_user_id} in room ${room_id} (HTTP ${http_code:-curl_error})"
+    return 1
+}
+
+# Ensure a Matrix user is invited into a room (idempotent best-effort with warning)
+# usage: ensure_room_member <room_id> <target_user_id> [sender_token]
+ensure_room_member() {
+    local room_id="${1:?room_id required}"
+    local target_user_id="${2:?target_user_id required}"
+    local sender_token="${3:-${MANAGER_MATRIX_TOKEN:-}}"
+
+    [ -z "${sender_token}" ] && return 1
+
+    local encoded_room
+    encoded_room=$(_url_encode_room "${room_id}")
+
+    local payload
+    payload=$(jq -cn --arg uid "${target_user_id}" '{user_id: $uid}')
+
+    local http_code
+    http_code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "${MATRIX_SERVER}/_matrix/client/v3/rooms/${encoded_room}/invite" \
+        -H "Authorization: Bearer ${sender_token}" \
+        -H 'Content-Type: application/json' \
+        -d "${payload}" 2>/dev/null || true)
+
+    case "${http_code}" in
+        2*)
+            return 0
+            ;;
+        *)
+            log "  WARNING: Failed to invite ${target_user_id} into room ${room_id} (HTTP ${http_code:-curl_error})"
+            return 1
+            ;;
+    esac
+}
+
+# Get workers that should interact with current worker for this room_key
+# - If registry has .rooms schema, scope to same room_key members
+# - Otherwise fallback to legacy behavior (all existing workers)
+get_room_peer_workers() {
+    local registry_file="${1:?registry file required}"
+    local room_key="${2:?room_key required}"
+    local self_worker="${3:?self worker required}"
+
+    if [ ! -f "${registry_file}" ]; then
+        return 0
+    fi
+
+    if jq -e --arg rk "${room_key}" '.rooms[$rk].members? != null' "${registry_file}" >/dev/null 2>&1; then
+        jq -r --arg rk "${room_key}" --arg self "${self_worker}" \
+            '.rooms[$rk].members // [] | .[] | select(. != $self)' \
+            "${registry_file}" 2>/dev/null || true
+    else
+        jq -r --arg self "${self_worker}" \
+            '.workers | keys[] | select(. != $self)' \
+            "${registry_file}" 2>/dev/null || true
+    fi
+}
+
+# Compute effective room key for this worker
+# Default to exec:<worker> for backward-compatible one-worker-one-room behavior
+if [ -z "${ROOM_KEY}" ]; then
+    ROOM_KEY=$(make_room_key exec "${WORKER_NAME}")
+fi
+
 # Check if room already exists in registry
 REGISTRY_FILE_CHECK="${HOME}/workers-registry.json"
 EXISTING_ROOM_ID=""
 ROOM_REUSE=false
 
 if [ -f "${REGISTRY_FILE_CHECK}" ]; then
-    EXISTING_ROOM_ID=$(jq -r --arg w "${WORKER_NAME}" '.workers[$w].room_id // empty' "${REGISTRY_FILE_CHECK}" 2>/dev/null || true)
+    EXISTING_ROOM_ID=$(jq -r --arg rk "${ROOM_KEY}" '.rooms[$rk].room_id // empty' "${REGISTRY_FILE_CHECK}" 2>/dev/null || true)
+
+    # Backward compatibility: if no rooms map and room_key is default exec:<worker>, use per-worker room_id
+    if [ -z "${EXISTING_ROOM_ID}" ] && [ "${ROOM_KEY}" = "exec:${WORKER_NAME}" ]; then
+        EXISTING_ROOM_ID=$(jq -r --arg w "${WORKER_NAME}" '.workers[$w].room_id // empty' "${REGISTRY_FILE_CHECK}" 2>/dev/null || true)
+    fi
 fi
 
 if [ -n "${EXISTING_ROOM_ID}" ]; then
@@ -233,16 +391,17 @@ if [ -n "${EXISTING_ROOM_ID}" ]; then
 
     # Check if Manager is still in this room
     ENCODED_ROOM=$(_url_encode_room "${EXISTING_ROOM_ID}")
-    ROOM_STATE=$(curl -sf "${MATRIX_SERVER}/_matrix/client/v3/rooms/${ENCODED_ROOM}/state/m.room.name" \
+    ROOM_STATE_CODE=$(curl -sS -o /dev/null -w '%{http_code}' \
+        "${MATRIX_SERVER}/_matrix/client/v3/rooms/${ENCODED_ROOM}/state/m.room.name" \
         -H "Authorization: Bearer ${MANAGER_MATRIX_TOKEN}" 2>/dev/null || true)
 
-    if [ -n "${ROOM_STATE}" ] && echo "${ROOM_STATE}" | jq -e '.name' > /dev/null 2>&1; then
+    if [[ "${ROOM_STATE_CODE}" =~ ^2[0-9][0-9]$ ]]; then
         # Room exists and Manager is in it - reuse it
         ROOM_ID="${EXISTING_ROOM_ID}"
         ROOM_REUSE=true
         log "  ✅ Reusing existing room: ${ROOM_ID}"
     else
-        log "  ⚠️ Existing room not accessible, will create new one"
+        log "  ⚠️ Existing room check failed (HTTP ${ROOM_STATE_CODE:-curl_error}), will create new room"
         EXISTING_ROOM_ID=""
     fi
 fi
@@ -250,18 +409,21 @@ fi
 # Create new room if not reusing
 if [ "${ROOM_REUSE}" = false ]; then
     log "  Creating new Matrix room..."
+    ROOM_PAYLOAD=$(jq -cn \
+        --arg rk "${ROOM_KEY}" \
+        --arg admin "@${ADMIN_USER}:${MATRIX_DOMAIN}" \
+        --arg worker "@${WORKER_NAME}:${MATRIX_DOMAIN}" \
+        '{
+            name: ("Worker Group: " + $rk),
+            topic: ("Worker collaboration room (" + $rk + ")"),
+            invite: [$admin, $worker],
+            preset: "trusted_private_chat"
+        }')
+
     ROOM_RESP=$(curl -sf -X POST ${MATRIX_SERVER}/_matrix/client/v3/createRoom \
         -H "Authorization: Bearer ${MANAGER_MATRIX_TOKEN}" \
         -H 'Content-Type: application/json' \
-        -d '{
-            "name": "Worker: '"${WORKER_NAME}"'",
-            "topic": "Communication channel for '"${WORKER_NAME}"'",
-            "invite": [
-                "@'"${ADMIN_USER}"':'"${MATRIX_DOMAIN}"'",
-                "@'"${WORKER_NAME}"':'"${MATRIX_DOMAIN}"'"
-            ],
-            "preset": "trusted_private_chat"
-        }' 2>/dev/null) || _fail "Failed to create Matrix room"
+        -d "${ROOM_PAYLOAD}" 2>/dev/null) || _fail "Failed to create Matrix room"
 
     ROOM_ID=$(echo "${ROOM_RESP}" | jq -r '.room_id // empty')
     if [ -z "${ROOM_ID}" ]; then
@@ -269,6 +431,10 @@ if [ "${ROOM_REUSE}" = false ]; then
     fi
     log "  Room created: ${ROOM_ID}"
 fi
+
+# Ensure current worker/admin are members of the interaction room
+ensure_room_member "${ROOM_ID}" "@${WORKER_NAME}:${MATRIX_DOMAIN}" "${MANAGER_MATRIX_TOKEN}"
+ensure_room_member "${ROOM_ID}" "@${ADMIN_USER}:${MATRIX_DOMAIN}" "${MANAGER_MATRIX_TOKEN}"
 
 # ============================================================
 # Step 3: Create Higress Consumer (key-auth)
@@ -393,9 +559,12 @@ log "Step 6.5: Adding existing Workers to new Worker's groupAllowFrom..."
 NEW_WORKER_CONFIG="/root/hiclaw-fs/agents/${WORKER_NAME}/openclaw.json"
 REGISTRY_FILE_EARLY="${HOME}/workers-registry.json"
 if [ -f "${REGISTRY_FILE_EARLY}" ]; then
-    EXISTING_WORKERS_EARLY=$(jq -r '.workers | keys[]' "${REGISTRY_FILE_EARLY}" 2>/dev/null | grep -v "^${WORKER_NAME}$" || true)
-    for ew in ${EXISTING_WORKERS_EARLY}; do
+    TARGET_PEERS=$(get_room_peer_workers "${REGISTRY_FILE_EARLY}" "${ROOM_KEY}" "${WORKER_NAME}")
+    for ew in ${TARGET_PEERS}; do
         EW_ID="@${ew}:${MATRIX_DOMAIN}"
+        # Ensure worker is invited into shared room for interaction
+        ensure_room_member "${ROOM_ID}" "${EW_ID}" "${MANAGER_MATRIX_TOKEN}"
+
         ALREADY=$(jq -r --arg w "${EW_ID}" \
             '.channels.matrix.groupAllowFrom // [] | map(select(. == $w)) | length' \
             "${NEW_WORKER_CONFIG}" 2>/dev/null || echo "0")
@@ -463,8 +632,8 @@ fi
 # ============================================================
 log "Step 8b: Updating existing Workers' groupAllowFrom..."
 if [ -f "${REGISTRY_FILE_EARLY}" ]; then
-    EXISTING_WORKERS_EARLY=$(jq -r '.workers | keys[]' "${REGISTRY_FILE_EARLY}" 2>/dev/null | grep -v "^${WORKER_NAME}$" || true)
-    for ew in ${EXISTING_WORKERS_EARLY}; do
+    TARGET_PEERS=$(get_room_peer_workers "${REGISTRY_FILE_EARLY}" "${ROOM_KEY}" "${WORKER_NAME}")
+    for ew in ${TARGET_PEERS}; do
         EW_MINIO="hiclaw/hiclaw-storage/agents/${ew}/openclaw.json"
         EW_TMP="/tmp/openclaw-${ew}-update.json"
         EW_TMP_OUT="/tmp/openclaw-${ew}-updated.json"
@@ -483,19 +652,12 @@ if [ -f "${REGISTRY_FILE_EARLY}" ]; then
                 "${EW_TMP}" > "${EW_TMP_OUT}"
             if mc cp "${EW_TMP_OUT}" "${EW_MINIO}" 2>/dev/null; then
                 log "  Updated ${ew}: added ${WORKER_MATRIX_ID} to groupAllowFrom"
-                # Notify worker to run hiclaw-sync
-                EW_ROOM_ID=$(jq -r --arg w "${ew}" '.workers[$w].room_id // empty' \
-                    "${REGISTRY_FILE_EARLY}" 2>/dev/null || true)
-                if [ -n "${EW_ROOM_ID}" ]; then
-                    TXN_ID=$(openssl rand -hex 8)
-                    curl -sf -X PUT \
-                        "${MATRIX_SERVER}/_matrix/client/v3/rooms/${EW_ROOM_ID}/send/m.room.message/${TXN_ID}" \
-                        -H "Authorization: Bearer ${MANAGER_MATRIX_TOKEN}" \
-                        -H 'Content-Type: application/json' \
-                        -d "{\"msgtype\":\"m.text\",\"body\":\"@${ew}:${MATRIX_DOMAIN} Your config has been updated (new worker @${WORKER_NAME}:${MATRIX_DOMAIN} added to groupAllowFrom). Please run: hiclaw-sync\",\"m.mentions\":{\"user_ids\":[\"@${ew}:${MATRIX_DOMAIN}\"]}}" \
-                        > /dev/null 2>&1 \
-                        && log "  Notified @${ew} to run hiclaw-sync" \
-                        || log "  WARNING: Failed to notify @${ew}"
+                # Notify peer worker in shared interaction room to run hiclaw-sync
+                EVENT_ID=$(send_mentioned_message "${ROOM_ID}" "@${ew}:${MATRIX_DOMAIN}" "Your config has been updated (new worker @${WORKER_NAME}:${MATRIX_DOMAIN} added to groupAllowFrom). Please run: hiclaw-sync" "${MANAGER_MATRIX_TOKEN}" || true)
+                if [ -n "${EVENT_ID}" ]; then
+                    log "  Notified @${ew} to run hiclaw-sync"
+                else
+                    log "  WARNING: Failed to notify @${ew}"
                 fi
             else
                 log "  WARNING: Failed to push updated config for ${ew} to MinIO"
@@ -546,19 +708,28 @@ WORKER_MATRIX_USER_ID="@${WORKER_NAME}:${MATRIX_DOMAIN}"
 jq --arg w "${WORKER_NAME}" \
    --arg uid "${WORKER_MATRIX_USER_ID}" \
    --arg rid "${ROOM_ID}" \
+   --arg rk "${ROOM_KEY}" \
    --arg ts "${NOW_TS}" \
    --argjson skills "${SKILLS_JSON}" \
    '.workers[$w] = {
      "matrix_user_id": $uid,
      "room_id": $rid,
+     "room_key": $rk,
      "skills": $skills,
      "created_at": (if .workers[$w].created_at? then .workers[$w].created_at else $ts end),
      "skills_updated_at": $ts
-   } | .updated_at = $ts' \
+   }
+   | .rooms = (.rooms // {})
+   | .rooms[$rk] = {
+       room_id: $rid,
+       members: (((.rooms[$rk].members // []) + [$w]) | unique),
+       updated_at: $ts
+     }
+   | .updated_at = $ts' \
    "${REGISTRY_FILE}" > /tmp/workers-registry-updated.json
 mv /tmp/workers-registry-updated.json "${REGISTRY_FILE}"
 
-log "  Registry updated for ${WORKER_NAME}: skills=${SKILLS_WITH_FILESYNC}"
+log "  Registry updated for ${WORKER_NAME}: room_key=${ROOM_KEY}, skills=${SKILLS_WITH_FILESYNC}"
 
 # Push skills to worker's MinIO workspace (Worker not yet started, no notification)
 bash /opt/hiclaw/agent/skills/worker-management/scripts/push-worker-skills.sh \
@@ -638,6 +809,7 @@ RESULT=$(jq -n \
     --arg name "${WORKER_NAME}" \
     --arg user_id "${WORKER_USER_ID}" \
     --arg room_id "${ROOM_ID}" \
+    --arg room_key "${ROOM_KEY}" \
     --arg consumer "${CONSUMER_NAME}" \
     --arg mode "${DEPLOY_MODE}" \
     --arg container_id "${CONTAINER_ID}" \
@@ -648,6 +820,7 @@ RESULT=$(jq -n \
         worker_name: $name,
         matrix_user_id: $user_id,
         room_id: $room_id,
+        room_key: $room_key,
         consumer: $consumer,
         skills: $skills,
         mode: $mode,
